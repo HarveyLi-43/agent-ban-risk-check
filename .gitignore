@@ -1,0 +1,5 @@
+audit-report/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

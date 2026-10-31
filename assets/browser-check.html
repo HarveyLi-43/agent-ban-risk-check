@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>代理环境体检 · WebRTC 层</title>
+<style>
+  :root {
+    --bg: #ffffff; --surface: #f7f7f5; --border: rgba(0,0,0,0.12);
+    --text: #1f1f1e; --muted: #6b6b66;
+    --ok: #3b6d11; --okbg: #eaf3de;
+    --warn: #854f0b; --warnbg: #faeeda;
+    --bad: #a32d2d; --badbg: #fcebeb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 56px 24px; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.65;
+  }
+  main { max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0 0 8px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 28px; }
+  .step { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: #ccc; flex: none; }
+  .dot.on { background: #888780; }
+  .dot.done { background: var(--ok); }
+  #verdict {
+    margin: 28px 0 20px; padding: 18px 20px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--surface); display: none;
+  }
+  #verdict .head { font-size: 15px; font-weight: 500; margin-bottom: 6px; }
+  #verdict .body { font-size: 13px; }
+  #verdict.ok { background: var(--okbg); border-color: rgba(59,109,17,0.25); }
+  #verdict.ok .head { color: var(--ok); }
+  #verdict.warn { background: var(--warnbg); border-color: rgba(133,79,11,0.25); }
+  #verdict.warn .head { color: var(--warn); }
+  #verdict.bad { background: var(--badbg); border-color: rgba(163,45,45,0.25); }
+  #verdict.bad .head { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; display: none; }
+  th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 400; width: 40%; }
+  td { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  .tag { font-family: inherit; font-size: 12px; padding: 1px 7px; border-radius: 4px; }
+  .tag-ok { background: var(--okbg); color: var(--ok); }
+  .tag-bad { background: var(--badbg); color: var(--bad); }
+  .tag-n { background: #eee; color: var(--muted); }
+  .closing { margin-top: 26px; color: var(--muted); font-size: 13px; display: none; }
+  code { background: var(--surface); padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>代理环境体检 · WebRTC 层</h1>
+  <p class="sub">自动开始，不需要操作。测完直接关掉本页，结果已回传给终端。</p>
+
+  <div class="step" id="s1"><span class="dot on"></span><span>读取网页出口 IP</span></div>
+  <div class="step" id="s2"><span class="dot"></span><span>收集 WebRTC 候选地址</span></div>
+  <div class="step" id="s3"><span class="dot"></span><span>比对出口是否一致</span></div>
+
+  <div id="verdict"><div class="head"></div><div class="body"></div></div>
+  <table id="tbl"></table>
+  <p class="closing" id="closing">结果已回传，可以关闭本页。</p>
+</main>
+
+<script>
+const STUN = 'stun:stun.l.google.com:19302';
+
+function mark(id, cls) {
+  const el = document.querySelector('#' + id + ' .dot');
+  if (el) el.className = 'dot ' + cls;
+}
+function parseCandidate(line) {
+  const p = String(line).split(' ');
+  return { address: p[4] || '', type: p[7] || '', protocol: p[2] || '' };
+}
+function isMDNS(a) { return /\.local$/i.test(a) || /^[0-9a-f-]{20,}$/i.test(a); }
+function isV6(a) { return a.includes(':'); }
+function isPrivateV4(a) {
+  return /^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^169\.254\./.test(a);
+}
+
+async function fetchIP(url, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try {
+    const r = await fetch(url, { cache: 'no-store', signal: c.signal });
+    const d = await r.json();
+    return d.ip || null;
+  } catch (e) {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+function collect(wait) {
+  return new Promise((resolve) => {
+    const list = [];
+    let pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [{ urls: STUN }] });
+    } catch (e) { resolve(list); return; }
+    pc.onicecandidate = (e) => { if (e.candidate && e.candidate.candidate) list.push(e.candidate.candidate); };
+    try { pc.createDataChannel('probe'); } catch (e) {}
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => {});
+    setTimeout(() => { try { pc.close(); } catch (e) {} resolve(list); }, wait);
+  });
+}
+
+function row(label, value, tagText, tagClass) {
+  return '<tr><th>' + label + '</th><td>' + value +
+    (tagText ? ' <span class="tag ' + tagClass + '">' + tagText + '</span>' : '') + '</td></tr>';
+}
+
+async function run() {
+  const http4 = await fetchIP('https://api.ipify.org?format=json', 6000);
+  const http6 = await fetchIP('https://api6.ipify.org?format=json', 6000);
+  mark('s1', 'done');
+  mark('s2', 'on');
+
+  const raw = await collect(9000);
+  mark('s2', 'done');
+  mark('s3', 'on');
+
+  const parsed = raw.map(parseCandidate);
+  const hostAll = parsed.filter(c => c.type === 'host');
+  const mdns = hostAll.filter(c => isMDNS(c.address));
+  const hostReal = hostAll.filter(c => !isMDNS(c.address)).map(c => c.address);
+  const srflx = parsed.filter(c => c.type === 'srflx' || c.type === 'prflx');
+  const srflxV4 = srflx.filter(c => !isV6(c.address)).map(c => c.address);
+  const srflxV6 = srflx.filter(c => isV6(c.address)).map(c => c.address);
+  const srflxMismatch = !!http4 && srflxV4.length > 0 && srflxV4.some(ip => ip !== http4);
+
+  let level = 'ok';
+  const notes = [];
+  if (hostReal.some(ip => !isV6(ip) && !isPrivateV4(ip)) || hostReal.some(isV6)) {
+    level = 'bad'; notes.push('浏览器直接报出了公网地址。');
+  } else if (hostReal.length) {
+    level = 'warn'; notes.push('浏览器报出了内网地址。');
+  }
+  if (srflxMismatch) { level = 'bad'; notes.push('STUN 出口与网页出口不一致。'); }
+  if (srflxV6.length) { level = 'bad'; notes.push('出现 IPv6 反射地址。'); }
+  if (!srflx.length) { if (level === 'ok') level = 'warn'; notes.push('没有收到反射地址，STUN 可能被拦截。'); }
+
+  const v = document.getElementById('verdict');
+  v.style.display = 'block';
+  v.className = level;
+  v.querySelector('.head').textContent =
+    level === 'ok' ? 'WebRTC 层：干净' : (level === 'warn' ? 'WebRTC 层：待确认' : 'WebRTC 层：检测到泄露');
+  v.querySelector('.body').textContent = notes.length ? notes.join(' ') : '出口一致，真实地址未暴露。';
+
+  let html = '';
+  html += row('网页出口 IPv4', http4 || '获取失败', http4 ? '已代理' : '未知', http4 ? 'tag-ok' : 'tag-n');
+  html += row('网页出口 IPv6', http6 || '不可用', http6 ? 'IPv6 出网' : '未出网', http6 ? 'tag-bad' : 'tag-ok');
+  html += row('STUN 反射地址', srflx.length ? srflx.map(c => c.address).join('<br>') : '无',
+    srflx.length && !srflxMismatch ? '与出口一致' : '见上', srflx.length && !srflxMismatch ? 'tag-ok' : 'tag-n');
+  html += row('真实主机地址', hostReal.length ? hostReal.join('<br>') : '未暴露',
+    hostReal.length ? '已暴露' : '已隐藏', hostReal.length ? 'tag-bad' : 'tag-ok');
+  html += row('mDNS 混淆', mdns.length + ' 条', '随机名', 'tag-ok');
+  const tbl = document.getElementById('tbl');
+  tbl.innerHTML = html;
+  tbl.style.display = 'table';
+
+  mark('s3', 'done');
+  document.getElementById('closing').style.display = 'block';
+
+  const payload = {
+    http4, http6, raw,
+    hostReal, srflxV4, srflxV6,
+    mdnsCount: mdns.length,
+    srflxMismatch: srflxMismatch,
+    level
+  };
+  try {
+    await fetch('/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    document.getElementById('closing').textContent = '回传失败。请手动复制本页信息给 Agent。';
+  }
+}
+
+run();
+</script>
+</body>
+</html>
