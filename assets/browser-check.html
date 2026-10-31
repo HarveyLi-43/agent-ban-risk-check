@@ -79,6 +79,16 @@ function isV6(a) { return a.includes(':'); }
 function isPrivateV4(a) {
   return /^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^169\.254\./.test(a);
 }
+function maskIP(ip) {
+  if (!ip) return '获取失败';
+  if (ip.includes(':')) {
+    const p = ip.split(':');
+    return p[0] + ':' + p[1] + ':****';
+  }
+  const p = ip.split('.');
+  if (p.length !== 4) return '***.***.***.***';
+  return p[0] + '.' + p[1] + '.***.***';
+}
 
 async function fetchIP(url, ms) {
   const c = new AbortController();
@@ -149,9 +159,9 @@ async function run() {
   v.querySelector('.body').textContent = notes.length ? notes.join(' ') : '出口一致，真实地址未暴露。';
 
   let html = '';
-  html += row('网页出口 IPv4', http4 || '获取失败', http4 ? '已代理' : '未知', http4 ? 'tag-ok' : 'tag-n');
-  html += row('网页出口 IPv6', http6 || '不可用', http6 ? 'IPv6 出网' : '未出网', http6 ? 'tag-bad' : 'tag-ok');
-  html += row('STUN 反射地址', srflx.length ? srflx.map(c => c.address).join('<br>') : '无',
+  html += row('网页出口 IPv4', http4 ? maskIP(http4) : '获取失败', http4 ? '已代理' : '未知', http4 ? 'tag-ok' : 'tag-n');
+  html += row('网页出口 IPv6', http6 ? maskIP(http6) : '不可用', http6 ? 'IPv6 出网' : '未出网', http6 ? 'tag-bad' : 'tag-ok');
+  html += row('STUN 反射地址', srflx.length ? srflx.map(c => maskIP(c.address)).join('<br>') : '无',
     srflx.length && !srflxMismatch ? '与出口一致' : '见上', srflx.length && !srflxMismatch ? 'tag-ok' : 'tag-n');
   html += row('真实主机地址', hostReal.length ? hostReal.join('<br>') : '未暴露',
     hostReal.length ? '已暴露' : '已隐藏', hostReal.length ? 'tag-bad' : 'tag-ok');
